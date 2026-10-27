@@ -4,6 +4,6 @@
   "private": true,
   "type": "module",
   "description": "Serverless API for Lone Keem Studios (Vercel functions + Supabase + fal.ai)",
-  "engines": { "node": "20.x" },
+  "engines": { "node": "24.x" },
   "scripts": { "test": "node --test test/" }
 }

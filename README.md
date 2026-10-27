@@ -1,6 +1,6 @@
 # lonekeem-studios-api
 
-Backend for **Lone Keem Studios** (AI short-series app). Vercel serverless functions (Node 20, zero dependencies) + Supabase (auth, Postgres with RLS, storage) + fal.ai (video generation queue).
+Backend for **Lone Keem Studios** (AI short-series app). Vercel serverless functions (Node 24, zero dependencies) + Supabase (auth, Postgres with RLS, storage) + fal.ai (video generation queue).
 
 - API base URL: `https://lonekeem-studios-api.vercel.app` (Vercel Hobby project `lonekeem-studios-api`)
 - Supabase project: `wwdwbnhswynjcxeerdgz` (us-east-1) — `https://wwdwbnhswynjcxeerdgz.supabase.co`
