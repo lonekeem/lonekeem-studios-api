@@ -3,6 +3,7 @@ import { getUser, getOwnClip, serverRpc, copyVideoToStorage } from '../lib/supab
 import { env } from '../lib/config.js';
 import * as fal from '../lib/fal.js';
 import { clipView } from '../lib/clip-view.js';
+import { isDemoClip, demoProgress, demoVideoUrl, isBillingError } from '../lib/demo.js';
 
 const STALE_MS = 60 * 60 * 1000; // give up (and refund) after 60 min
 
@@ -28,8 +29,21 @@ export default async function handler(req, res) {
   let clip = await getOwnClip(jwt, id);
   if (!clip || clip.owner_id !== user.id) return send(res, 404, { error: 'not_found' });
 
+  // Demo clips: simulated queue -> running -> done with a built-in sample video (no fal, no storage copy)
+  if (isDemoClip(clip) && clip.status !== 'done' && clip.status !== 'failed') {
+    const p = demoProgress(clip);
+    if (p.status === 'COMPLETED') {
+      await serverRpc('finish_clip', { p_clip: clip.id, p_status: 'done', p_video_url: demoVideoUrl(clip), p_storage_path: null });
+      clip = await getOwnClip(jwt, id);
+      return send(res, 200, { clip: clipView(clip), mode: 'demo' });
+    }
+    const st = p.status === 'IN_PROGRESS' ? 'running' : 'queued';
+    if (st !== clip.status) { await serverRpc('set_clip_request', { p_clip: clip.id, p_request_id: null, p_status: st }).catch(() => {}); clip.status = st; }
+    return send(res, 200, { clip: clipView(clip), mode: 'demo', provider: p });
+  }
+
   // Finished by the webhook with a fal URL: opportunistically move it into Supabase storage
-  if (clip.status === 'done' && !clip.storage_path && clip.video_url) {
+  if (clip.status === 'done' && !clip.storage_path && clip.video_url && !isDemoClip(clip)) {
     try {
       const copy = await copyVideoToStorage({ jwt, userId: user.id, clipId: clip.id, videoUrl: clip.video_url });
       if (copy) {
@@ -38,7 +52,7 @@ export default async function handler(req, res) {
       }
     } catch { /* keep fal url */ }
   }
-  if (clip.status === 'done' || clip.status === 'failed') return send(res, 200, { clip: clipView(clip) });
+  if (clip.status === 'done' || clip.status === 'failed') return send(res, 200, { clip: clipView(clip), mode: isDemoClip(clip) ? 'demo' : 'real' });
 
   if (!clip.fal_request_id || !env.falKey()) {
     if (Date.now() - new Date(clip.created_at).getTime() > STALE_MS) {
@@ -61,7 +75,8 @@ export default async function handler(req, res) {
     if (videoUrl) await finalizeDone({ jwt, user, clip, videoUrl });
     else {
       const detail = r.data && r.data.detail ? (typeof r.data.detail === 'string' ? r.data.detail : JSON.stringify(r.data.detail)) : `http_${r.status}`;
-      await serverRpc('finish_clip', { p_clip: clip.id, p_status: 'failed', p_error: String(detail).slice(0, 300) });
+      const err = isBillingError(r.status, detail) ? 'real_generation_not_enabled' : String(detail).slice(0, 300);
+      await serverRpc('finish_clip', { p_clip: clip.id, p_status: 'failed', p_error: err });
     }
     clip = await getOwnClip(jwt, id);
     return send(res, 200, { clip: clipView(clip) });

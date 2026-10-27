@@ -4,6 +4,7 @@ import { getUser, serverRpc } from '../lib/supabase.js';
 import { moderate } from '../lib/moderation.js';
 import * as fal from '../lib/fal.js';
 import { webhookToken } from '../lib/webhook-token.js';
+import { DEMO_PREFIX, isBillingError } from '../lib/demo.js';
 
 export default async function handler(req, res) {
   if (applyCors(req, res)) return;
@@ -31,7 +32,8 @@ export default async function handler(req, res) {
   const mod = await moderate(prompt);
   if (!mod.allowed) return send(res, 422, { error: 'prompt_rejected', reason: mod.reason });
 
-  if (!env.falKey()) return send(res, 503, { error: 'generation_unavailable', message: 'Video provider not configured yet.' });
+  const mode = env.generationMode();
+  if (mode === 'real' && !env.falKey()) return send(res, 503, NOT_ENABLED);
 
   // Atomically: rate-limit check + reel deduction + clip row (status queued)
   let start;
@@ -50,25 +52,46 @@ export default async function handler(req, res) {
   }
 
   const clipId = start.clip_id;
+  const accepted = (status = 'queued') => send(res, 202, {
+    clip: { id: clipId, status, model: modelId, length, quality, aspect_ratio: aspect, cost, demo: mode === 'demo' },
+    mode,
+    balance: start.balance,
+    generations_used_24h: start.used_24h,
+    daily_limit: start.limit,
+    poll: `/api/status?id=${clipId}`,
+  });
+
+  if (mode === 'demo') {
+    // Same queue/status flow, but the "provider" is a built-in sample clip (no fal call, no cost).
+    try {
+      await serverRpc('set_clip_request', { p_clip: clipId, p_request_id: `${DEMO_PREFIX}${Date.now()}`, p_status: 'queued' });
+      return accepted();
+    } catch (e) {
+      console.error('demo set_clip_request', e.status, e.message);
+      const fin = await serverRpc('finish_clip', { p_clip: clipId, p_status: 'failed', p_error: 'demo_start_failed' }).catch(() => null);
+      return send(res, 500, { error: 'server_error', clip: { id: clipId, status: 'failed' }, balance: fin?.balance });
+    }
+  }
   const base = env.publicBaseUrl();
   const webhookUrl = base ? `${base}/api/fal-webhook?clip=${clipId}&t=${webhookToken(clipId)}` : null;
 
   try {
     const sub = await fal.submit(model.endpoint, model.buildInput({ prompt, length, aspect }), webhookUrl);
     await serverRpc('set_clip_request', { p_clip: clipId, p_request_id: sub.request_id, p_status: 'queued' });
-    return send(res, 202, {
-      clip: { id: clipId, status: 'queued', model: modelId, length, quality, aspect_ratio: aspect, cost },
-      balance: start.balance,
-      generations_used_24h: start.used_24h,
-      daily_limit: start.limit,
-      poll: `/api/status?id=${clipId}`,
-    });
+    return accepted();
   } catch (e) {
     console.error('fal submit', e.status, e.detail);
-    const fin = await serverRpc('finish_clip', { p_clip: clipId, p_status: 'failed', p_error: `provider_submit_failed:${e.status || ''}` }).catch(() => null);
+    const billing = isBillingError(e.status, e.detail);
+    const fin = await serverRpc('finish_clip', { p_clip: clipId, p_status: 'failed', p_error: billing ? 'real_generation_not_enabled' : `provider_submit_failed:${e.status || ''}` }).catch(() => null);
+    if (billing) return send(res, 503, { ...NOT_ENABLED, refunded: true, clip: { id: clipId, status: 'failed' }, balance: fin?.balance });
     return send(res, 502, {
       error: 'provider_error', message: 'Could not start generation; reels refunded.',
       clip: { id: clipId, status: 'failed' }, balance: fin && fin.balance != null ? fin.balance : undefined,
     });
   }
 }
+
+const NOT_ENABLED = {
+  error: 'real_generation_not_enabled',
+  message: 'Real AI video generation is not enabled yet. Your reels were not spent (or have been refunded). Demo mode still works.',
+};

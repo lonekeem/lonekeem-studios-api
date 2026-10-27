@@ -1,10 +1,11 @@
 import { applyCors, send } from '../lib/http.js';
-import { MODELS, DEFAULT_MODEL, ASPECTS, DEFAULT_ASPECT } from '../lib/config.js';
+import { env, MODELS, DEFAULT_MODEL, ASPECTS, DEFAULT_ASPECT } from '../lib/config.js';
 
 export default function handler(req, res) {
   if (applyCors(req, res)) return;
   res.setHeader('Cache-Control', 'public, max-age=300');
   send(res, 200, {
+    generation_mode: env.generationMode(),
     default_model: DEFAULT_MODEL,
     aspect_ratios: ASPECTS,
     default_aspect_ratio: DEFAULT_ASPECT,

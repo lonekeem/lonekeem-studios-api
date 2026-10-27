@@ -6,6 +6,15 @@ Backend for **Lone Keem Studios** (AI short-series app). Vercel serverless funct
 - Supabase project: `wwdwbnhswynjcxeerdgz` (us-east-1) — `https://wwdwbnhswynjcxeerdgz.supabase.co`
 - Schema/migrations: [`supabase/migrations/`](supabase/migrations)
 
+## Generation mode: demo (default) vs real
+
+`GENERATION_MODE` controls what `/api/generate` does. **It defaults to `demo`**, and production is set to `demo`.
+
+- **demo**: the full real pipeline runs (auth, moderation, rate limit, atomic reel deduction, ledger, clip row, queue → running → done via `/api/status`), but instead of calling fal.ai the clip completes after ~9 s with a built-in sample video (`/demo/{9x16|16x9|1x1}-{a|b|c}.mp4`, matched to the aspect ratio). No fal calls, no cost. Responses include `"mode":"demo"` and `clip.demo: true`.
+- **real**: jobs go to fal.ai. If `FAL_KEY` is missing, or fal answers with a balance/payment error (no credit, locked account), the reels are refunded and the API returns `503 {"error":"real_generation_not_enabled", ...}`. Clips that are refunded don't count toward the daily limit.
+
+To go live later: add fal credit, then set `GENERATION_MODE=real` in Vercel and redeploy.
+
 ---
 
 ## Frontend integration guide
@@ -75,7 +84,7 @@ CORS allows `https://lonekeem.github.io`, `capacitor://localhost`, `ionic://loca
 
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
-| GET | `/api/health` | – | Liveness + which integrations are configured |
+| GET | `/api/health` | – | Liveness, configured integrations, `generation_mode` |
 | GET | `/api/models` | – | Model list, lengths, reel prices |
 | GET | `/api/me` | Bearer | Profile, reel balance, daily-claim availability, usage |
 | POST | `/api/generate` | Bearer | Start a clip (moderation → rate limit → deduct reels → fal queue) |
@@ -118,16 +127,16 @@ Request:
 Responses:
 - `202` started:
   ```json
-  { "clip": { "id": "uuid", "status": "queued", "model": "fast", "length": 5, "quality": "480p", "aspect_ratio": "9:16", "cost": 5 },
-    "balance": 495, "generations_used_24h": 1, "daily_limit": 10, "poll": "/api/status?id=uuid" }
+  { "clip": { "id": "uuid", "status": "queued", "model": "fast", "length": 5, "quality": "480p", "aspect_ratio": "9:16", "cost": 5, "demo": true },
+    "mode": "demo", "balance": 495, "generations_used_24h": 1, "daily_limit": 10, "poll": "/api/status?id=uuid" }
   ```
 - `401 {"error":"unauthorized"}` – missing/invalid Supabase token
 - `400 {"error":"prompt_required" | "prompt_too_long" | "unknown_model" | "invalid_json"}`
 - `422 {"error":"prompt_rejected","reason":"blocked_terms"}` – moderation
 - `402 {"ok":false,"error":"insufficient_reels","balance":3,"cost":5}`
 - `429 {"ok":false,"error":"rate_limited","used_24h":10,"limit":10,"balance":…}` – default 10 generations / user / rolling 24h
-- `503 {"error":"generation_unavailable"}` – FAL_KEY not configured (no reels charged)
-- `502 {"error":"provider_error","clip":{"id":…,"status":"failed"},"balance":…}` – fal rejected the job; reels already refunded
+- `503 {"error":"real_generation_not_enabled","message":"…","refunded":true,"clip":{…},"balance":…}` – real mode only: no FAL_KEY (nothing charged) or fal has no credit/payment method (reels refunded). Show "AI generation coming soon" and/or retry in demo.
+- `502 {"error":"provider_error","clip":{"id":…,"status":"failed"},"balance":…}` – fal rejected the job for another reason; reels already refunded
 
 #### `GET /api/status?id=<clip id>`
 Poll every ~3–5 s until `status` is `done` or `failed`.
@@ -135,11 +144,13 @@ Poll every ~3–5 s until `status` is `done` or `failed`.
 { "clip": { "id": "uuid", "status": "queued|running|done|failed", "model": "fast", "prompt": "…", "length": 5,
             "quality": "480p", "aspect_ratio": "9:16", "cost": 5, "refunded": false,
             "video_url": "https://wwdwbnhswynjcxeerdgz.supabase.co/storage/v1/object/public/clips/<uid>/<clip>.mp4",
-            "storage_path": "<uid>/<clip>.mp4", "error": null, "character_id": null,
+            "storage_path": "<uid>/<clip>.mp4", "error": null, "character_id": null, "demo": false,
             "created_at": "…", "updated_at": "…" },
+  "mode": "real",
   "provider": { "status": "IN_QUEUE|IN_PROGRESS", "queue_position": 2 } }
 ```
-When done, the video is copied into the public `clips` bucket (≤50 MB); if that copy fails, `video_url` is the fal CDN URL. Failed or timed-out (60 min) clips are refunded automatically (`refunded: true`).
+In demo mode `video_url` is the sample clip on the API domain and `storage_path` is null.
+When done, the video is copied into the public `clips` bucket (≤50 MB); if that copy fails, `video_url` is the fal CDN URL. Failed or timed-out (60 min) clips are refunded automatically (`refunded: true`) and don't count toward the daily limit.
 
 #### `POST /api/claim-daily`
 - `200 {"ok":true,"granted":50,"balance":545,"next_claim_at":"2026-10-28T00:00:00+00:00"}`
@@ -195,7 +206,8 @@ Env vars (Vercel → Project → Settings → Environment Variables):
 | `SUPABASE_ANON_KEY` | yes | public anon key |
 | `API_SERVER_SECRET` | yes* | 64-hex secret; `sha256` stored in `private.app_config.server_secret_sha256`. Lets the API call the privileged DB functions |
 | `SUPABASE_SERVICE_ROLE_KEY` | optional* | if set, used instead of the server secret (*one of the two is required) |
-| `FAL_KEY` | for generation | fal.ai API key (sensitive) |
+| `GENERATION_MODE` | optional | `demo` (default) or `real` |
+| `FAL_KEY` | real mode | fal.ai API key (sensitive) |
 | `DAILY_GENERATION_LIMIT` | optional | default 10 |
 | `PUBLIC_BASE_URL` | optional | for fal webhooks; defaults to the Vercel production URL |
 | `MODERATION_WEBHOOK_URL` | optional | hook for a real moderation model: POST `{text}` → `{allowed, reason}` |

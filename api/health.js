@@ -10,6 +10,7 @@ export default function handler(req, res) {
     config: {
       supabase: !!(env.supabaseUrl() && env.anonKey()),
       server_auth: env.serviceKey() ? 'service_role' : env.serverSecret() ? 'server_secret' : 'missing',
+      generation_mode: env.generationMode(),
       fal: !!env.falKey(),
       daily_generation_limit: env.dailyLimit(),
     },
