@@ -1,0 +1,9 @@
+{
+  "name": "lonekeem-studios-api",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Serverless API for Lone Keem Studios (Vercel functions + Supabase + fal.ai)",
+  "engines": { "node": "20.x" },
+  "scripts": { "test": "node --test test/" }
+}
