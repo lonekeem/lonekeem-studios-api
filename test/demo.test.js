@@ -25,10 +25,10 @@ test('billing errors detected', () => {
   assert.ok(!isBillingError(500, ''));
 });
 
-test('generation mode defaults to demo', () => {
+test('global generation mode is always demo (real is per-owner only)', () => {
   delete process.env.GENERATION_MODE;
   assert.equal(env.generationMode(), 'demo');
   process.env.GENERATION_MODE = 'REAL';
-  assert.equal(env.generationMode(), 'real');
+  assert.equal(env.generationMode(), 'demo');
   delete process.env.GENERATION_MODE;
 });

@@ -1,5 +1,6 @@
 import { applyCors, send, methodGuard, readJson, bearer } from '../lib/http.js';
-import { MODELS, DEFAULT_MODEL, ASPECTS, DEFAULT_ASPECT, MAX_PROMPT, resolveLength, env } from '../lib/config.js';
+import { MODELS, DEFAULT_MODEL, ASPECTS, DEFAULT_ASPECT, MAX_PROMPT, REAL_MAX_LENGTH, resolveLength, env } from '../lib/config.js';
+import { isOwner, generationModeFor } from '../lib/owner.js';
 import { getUser, serverRpc } from '../lib/supabase.js';
 import { moderate } from '../lib/moderation.js';
 import * as fal from '../lib/fal.js';
@@ -20,10 +21,22 @@ export default async function handler(req, res) {
   if (!prompt) return send(res, 400, { error: 'prompt_required' });
   if (prompt.length > MAX_PROMPT) return send(res, 400, { error: 'prompt_too_long', max: MAX_PROMPT });
 
-  const modelId = body.model && MODELS[body.model] ? body.model : body.model ? null : DEFAULT_MODEL;
+  // Everyone gets demo clips; only owners (OWNER_USER_IDS / OWNER_EMAILS) with REAL_FOR_OWNERS on get real fal clips.
+  const owner = isOwner(user);
+  const mode = generationModeFor(user);
+  const real = mode === 'real';
+
+  // Real mode: cheapest model by default, owner may pick from the real allowlist.
+  const realModels = env.realModels();
+  const defaultModel = real ? realModels[0] : DEFAULT_MODEL;
+  const modelId = body.model && MODELS[body.model] ? body.model : body.model ? null : defaultModel;
   if (!modelId) return send(res, 400, { error: 'unknown_model', models: Object.keys(MODELS) });
+  if (real && !realModels.includes(modelId)) {
+    return send(res, 400, { error: 'model_not_allowed', message: `Real clips can use: ${realModels.join(', ')}`, models: realModels });
+  }
   const model = MODELS[modelId];
-  const length = resolveLength(modelId, body.length);
+  // Real clips are hard-capped at 5 s (one short clip per generation).
+  const length = real ? Math.min(REAL_MAX_LENGTH, Math.min(...model.lengths)) : resolveLength(modelId, body.length);
   const aspect = ASPECTS.includes(body.aspect_ratio) ? body.aspect_ratio : DEFAULT_ASPECT;
   const quality = modelId === 'hailuo' ? '768p' : '480p';
   const cost = model.price[length];
@@ -32,36 +45,36 @@ export default async function handler(req, res) {
   const mod = await moderate(prompt);
   if (!mod.allowed) return send(res, 422, { error: 'prompt_rejected', reason: mod.reason });
 
-  const mode = env.generationMode();
-  if (mode === 'real' && !env.falKey()) return send(res, 503, NOT_ENABLED);
-
   // Atomically: rate-limit check + reel deduction + clip row (status queued)
   let start;
   try {
     start = await serverRpc('start_generation', {
       p_user: user.id, p_prompt: prompt, p_model: modelId, p_endpoint: model.endpoint, p_length: length,
       p_quality: quality, p_aspect: aspect, p_cost: cost, p_daily_limit: env.dailyLimit(), p_character_id: characterId,
+      p_real: real, p_real_cap: env.ownerDailyRealCap(),
     });
   } catch (e) {
     console.error('start_generation', e.status, e.message);
     return send(res, 500, { error: 'server_error' });
   }
   if (!start.ok) {
-    const code = start.error === 'rate_limited' ? 429 : start.error === 'insufficient_reels' ? 402 : 400;
+    const code = start.error === 'rate_limited' || start.error === 'owner_real_cap_reached' ? 429 : start.error === 'insufficient_reels' ? 402 : 400;
     return send(res, code, start);
   }
 
   const clipId = start.clip_id;
   const accepted = (status = 'queued') => send(res, 202, {
-    clip: { id: clipId, status, model: modelId, length, quality, aspect_ratio: aspect, cost, demo: mode === 'demo' },
+    clip: { id: clipId, status, model: modelId, length, quality, aspect_ratio: aspect, cost, demo: !real },
     mode,
+    owner,
+    ...(real ? { real_used_24h: start.real_used_24h, real_cap: start.real_cap } : {}),
     balance: start.balance,
     generations_used_24h: start.used_24h,
     daily_limit: start.limit,
     poll: `/api/status?id=${clipId}`,
   });
 
-  if (mode === 'demo') {
+  if (!real) {
     // Same queue/status flow, but the "provider" is a built-in sample clip (no fal call, no cost).
     try {
       await serverRpc('set_clip_request', { p_clip: clipId, p_request_id: `${DEMO_PREFIX}${Date.now()}`, p_status: 'queued' });

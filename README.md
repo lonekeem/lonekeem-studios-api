@@ -6,14 +6,22 @@ Backend for **Lone Keem Studios** (AI short-series app). Vercel serverless funct
 - Supabase project: `wwdwbnhswynjcxeerdgz` (us-east-1) — `https://wwdwbnhswynjcxeerdgz.supabase.co`
 - Schema/migrations: [`supabase/migrations/`](supabase/migrations)
 
-## Generation mode: demo (default) vs real
+## Generation mode: demo for everyone, real only for the owner
 
-`GENERATION_MODE` controls what `/api/generate` does. **It defaults to `demo`**, and production is set to `demo`.
+**Every user gets demo clips.** Real fal.ai clips are generated **only** for owner accounts, and only when switched on.
 
-- **demo**: the full real pipeline runs (auth, moderation, rate limit, atomic reel deduction, ledger, clip row, queue → running → done via `/api/status`), but instead of calling fal.ai the clip completes after ~9 s with a built-in sample video (`/demo/{9x16|16x9|1x1}-{a|b|c}.mp4`, matched to the aspect ratio). No fal calls, no cost. Responses include `"mode":"demo"` and `clip.demo: true`.
-- **real**: jobs go to fal.ai. If `FAL_KEY` is missing, or fal answers with a balance/payment error (no credit, locked account), the reels are refunded and the API returns `503 {"error":"real_generation_not_enabled", ...}`. Clips that are refunded don't count toward the daily limit.
+- **demo** (everyone, always): the full pipeline runs (auth, moderation, rate limit, atomic reel deduction, ledger, clip row, queue → running → done via `/api/status`), but instead of calling fal.ai the clip completes after ~9 s with a built-in sample video (`/demo/{9x16|16x9|1x1}-{a|b|c}.mp4`). No fal calls, no cost. Responses include `"mode":"demo"` and `clip.demo: true`.
+- **real** (owners only): a user is an owner if their Supabase user id is in `OWNER_USER_IDS`, or their **confirmed** email is in `OWNER_EMAILS`. Real mode applies when the user is an owner **and** `REAL_FOR_OWNERS=true` **and** `FAL_KEY` is set. (`REAL_FOR_OWNERS=false` always wins; if it is unset, `GENERATION_MODE=real` is accepted as the legacy switch — for owners only.)
+  - Hard cap: `OWNER_DAILY_REAL_CAP` (default **5**) real generations per owner per rolling 24 h, enforced atomically in Postgres (`start_generation` + server-only `private.real_generations` log that survives clip deletion). When hit: `429 {"error":"owner_real_cap_reached","real_used_24h":5,"real_cap":5,"message":"Daily cap of 5 real AI clips reached…"}`.
+  - Every real clip is **5 s max**, 480p. Default model is the cheapest: `fast` = `fal-ai/wan/v2.2-5b/text-to-video/fast-wan` (~$0.025/clip). Owner can pass `model: "seedance"` (`fal-ai/bytedance/seedance/v1/pro/fast/text-to-video`, ~$0.05/clip @480p 5 s) or `model: "kling"` (`fal-ai/kling-video/v2.5-turbo/pro/text-to-video`, $0.07/s ≈ $0.35/clip). Allowlist override: `OWNER_REAL_MODELS=fast,seedance,kling`.
+  - Failure never costs reels: if fal rejects the submit (incl. balance/payment errors → `503 real_generation_not_enabled`, `refunded:true`), or the job later fails/times out, the clip is marked failed, the reels are refunded, and it doesn't count toward the daily limit or the owner cap.
+- `/api/me` returns `owner`, `generation_mode` (what *this* user gets) and, for owners, `real: {enabled, used_24h, cap, models, max_length_s}`. `/api/health` shows `real_for_owners`, `owners_configured` (count only), `owner_daily_real_cap`.
 
-To go live later: add fal credit, then set `GENERATION_MODE=real` in Vercel and redeploy.
+### Turning real clips on for Keem
+1. Keem signs in once on the app (creates his Supabase user).
+2. Find his id: Supabase → Authentication → Users (or `select id, email from auth.users`).
+3. Vercel env (Production): `OWNER_USER_IDS=<his uuid>` (preferred) and/or `OWNER_EMAILS=<his confirmed email>`, `OWNER_DAILY_REAL_CAP=5`, make sure `FAL_KEY` is the real key and fal has credit, then `REAL_FOR_OWNERS=true`.
+4. Redeploy (env changes apply to new deployments). To switch off instantly: `REAL_FOR_OWNERS=false` + redeploy.
 
 ---
 
@@ -206,7 +214,12 @@ Env vars (Vercel → Project → Settings → Environment Variables):
 | `SUPABASE_ANON_KEY` | yes | public anon key |
 | `API_SERVER_SECRET` | yes* | 64-hex secret; `sha256` stored in `private.app_config.server_secret_sha256`. Lets the API call the privileged DB functions |
 | `SUPABASE_SERVICE_ROLE_KEY` | optional* | if set, used instead of the server secret (*one of the two is required) |
-| `GENERATION_MODE` | optional | `demo` (default) or `real` |
+| `GENERATION_MODE` | optional | legacy; global mode is always demo. `real` only enables owners when `REAL_FOR_OWNERS` is unset |
+| `REAL_FOR_OWNERS` | optional | `true` = owners get real fal clips; `false` (current) = nobody does |
+| `OWNER_USER_IDS` | optional | comma-separated Supabase user ids |
+| `OWNER_EMAILS` | optional | comma-separated emails (must be confirmed in Supabase Auth) |
+| `OWNER_DAILY_REAL_CAP` | optional | default 5 real clips per owner per rolling 24 h |
+| `OWNER_REAL_MODELS` | optional | default `fast,seedance,kling` (first = default model) |
 | `FAL_KEY` | real mode | fal.ai API key (sensitive) |
 | `DAILY_GENERATION_LIMIT` | optional | default 10 |
 | `PUBLIC_BASE_URL` | optional | for fal webhooks; defaults to the Vercel production URL |
